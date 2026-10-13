@@ -1,3 +1,4 @@
+import 'home_router.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -5,6 +6,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 const Color navy = Color(0xFF142F70);
 const Color blue = Color(0xFF176BC0);
 const Color cyan = Color(0xFF31B6F5);
+
+const String adminEmail = 'admin@drivana.com';
+
+final supabase = Supabase.instance.client;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,8 +21,6 @@ Future<void> main() async {
 
   runApp(const DrivanaApp());
 }
-
-final supabase = Supabase.instance.client;
 
 class DrivanaApp extends StatelessWidget {
   const DrivanaApp({super.key});
@@ -70,9 +73,11 @@ class _AuthPageState extends State<AuthPage> {
 
   void _switchMode(AuthMode mode) {
     FocusScope.of(context).unfocus();
+
     setState(() {
       _mode = mode;
       _mitraLogin = false;
+      _role = 'customer';
       _formKey.currentState?.reset();
       _name.clear();
       _email.clear();
@@ -86,12 +91,12 @@ class _AuthPageState extends State<AuthPage> {
 
     await showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Text(title),
         content: Text(message),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: const Text('Mengerti'),
           ),
         ],
@@ -121,12 +126,14 @@ class _AuthPageState extends State<AuthPage> {
   Future<void> _submit() async {
     FocusScope.of(context).unfocus();
 
-    if (!_formKey.currentState!.validate()) return;
+    final form = _formKey.currentState;
+    if (form == null || !form.validate()) return;
 
     setState(() => _loading = true);
 
     try {
       if (_mode == AuthMode.register) {
+        // REGISTRASI CUSTOMER ATAU MITRA
         final response = await supabase.auth.signUp(
           email: _email.text.trim(),
           password: _password.text,
@@ -142,25 +149,29 @@ class _AuthPageState extends State<AuthPage> {
         if (response.session == null) {
           await _showMessage(
             'Registrasi berhasil',
-            'Akun berhasil dibuat. Jika verifikasi email diaktifkan, '
-                'silakan periksa email Anda untuk mengaktifkan akun, '
-                'kemudian masuk ke Drivana.',
+            'Akun berhasil dibuat. Silakan periksa email untuk '
+                'verifikasi jika diminta, kemudian masuk ke Drivana.',
           );
-          if (mounted) _switchMode(AuthMode.login);
+
+          if (mounted) {
+            _switchMode(AuthMode.login);
+          }
         } else {
           await _showMessage(
             'Registrasi berhasil',
             'Selamat datang di Drivana! Akun Anda telah dibuat.',
           );
-          if (mounted) {
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) => const WelcomePage(),
-              ),
-            );
-          }
+
+          if (!mounted) return;
+
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => const HomeRouter(),
+            ),
+          );
         }
       } else {
+        // LOGIN: CUSTOMER, MITRA, ATAU ADMIN
         final response = await supabase.auth.signInWithPassword(
           email: _email.text.trim(),
           password: _password.text,
@@ -168,7 +179,9 @@ class _AuthPageState extends State<AuthPage> {
 
         if (!mounted) return;
 
-        if (response.user == null) {
+        final user = response.user;
+
+        if (user == null) {
           await _showMessage(
             'Login gagal',
             'Email atau password salah.',
@@ -176,48 +189,99 @@ class _AuthPageState extends State<AuthPage> {
           return;
         }
 
-        final metadata = response.user!.userMetadata;
-        final actualRole = metadata?['role']?.toString() ?? 'customer';
+        final email = user.email?.trim().toLowerCase();
+        final configuredAdminEmail = adminEmail.trim().toLowerCase();
 
-        if (_mitraLogin && actualRole != 'mitra') {
-          await supabase.auth.signOut();
-          await _showMessage(
-            'Akun bukan Mitra',
-            'Silakan gunakan akun Mitra untuk masuk melalui menu ini.',
+        // Role Admin wajib ditetapkan melalui app_metadata
+        // oleh pengelola tepercaya di Supabase.
+        final appRole = user.appMetadata['role']?.toString();
+
+        // Admin dikenali otomatis berdasarkan email.
+        // Namun, email saja tidak memberikan hak akses Admin.
+        if (email == configuredAdminEmail) {
+          if (appRole != 'admin') {
+            await supabase.auth.signOut();
+
+            if (!mounted) return;
+
+            await _showMessage(
+              'Akun Admin belum dikonfigurasi',
+              'Email ini cocok dengan email Admin, tetapi role Admin '
+                  'belum ditetapkan pada app_metadata di Supabase.',
+            );
+            return;
+          }
+
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => const HomeRouter(),
+            ),
           );
           return;
         }
 
-        if (!_mitraLogin && actualRole == 'mitra') {
+        // Akun dengan role admin tidak menggunakan jalur Customer/Mitra.
+        if (appRole == 'admin') {
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) => const HomeRouter(),
+            ),
+          );
+          return;
+        }
+
+        // Role Customer/Mitra saat ini mengikuti metadata registrasi.
+        final userRole = user.userMetadata?['role']?.toString();
+        final actualRole = userRole == 'mitra' ? 'mitra' : 'customer';
+
+        if (_mitraLogin && actualRole != 'mitra') {
           await supabase.auth.signOut();
+
+          if (!mounted) return;
+
           await _showMessage(
-            'Gunakan login Mitra',
-            'Akun ini terdaftar sebagai Mitra. Silakan pilih '
-                '"Masuk Sebagai Mitra".',
+            'Akun bukan Mitra',
+            'Silakan gunakan akun yang terdaftar sebagai Mitra.',
+          );
+          return;
+        }
+
+        if (!_mitraLogin && actualRole != 'customer') {
+          await supabase.auth.signOut();
+
+          if (!mounted) return;
+
+          await _showMessage(
+            'Gunakan menu login yang sesuai',
+            'Akun ini terdaftar sebagai ${actualRole.toUpperCase()}.',
           );
           return;
         }
 
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
-            builder: (_) => WelcomePage(role: actualRole),
+            builder: (_) => const HomeRouter(),
           ),
         );
       }
     } catch (error) {
+      if (!mounted) return;
+
       await _showMessage(
         _mode == AuthMode.login ? 'Login gagal' : 'Registrasi gagal',
         _friendlyError(error),
       );
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+      }
     }
   }
 
   Future<void> _forgotPassword() async {
     final email = _email.text.trim();
 
-    if (!email.contains('@') || !email.contains('.')) {
+    if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email)) {
       await _showMessage(
         'Lupa Password',
         'Masukkan alamat email yang valid pada kolom Email terlebih dahulu.',
@@ -229,15 +293,21 @@ class _AuthPageState extends State<AuthPage> {
 
     try {
       await supabase.auth.resetPasswordForEmail(email);
+
+      if (!mounted) return;
+
       await _showMessage(
         'Periksa Email Anda',
         'Jika email terdaftar, instruksi pemulihan password akan dikirim '
             'ke alamat tersebut.',
       );
     } catch (error) {
+      if (!mounted) return;
       await _showMessage('Gagal', _friendlyError(error));
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -270,9 +340,7 @@ class _AuthPageState extends State<AuthPage> {
                       _brandIcon(),
                       const SizedBox(height: 18),
                       Text(
-                        isRegister
-                            ? 'Buat Akun Baru'
-                            : 'Selamat\nDatang!',
+                        isRegister ? 'Buat Akun Baru' : 'Selamat\nDatang!',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 29,
@@ -314,9 +382,8 @@ class _AuthPageState extends State<AuthPage> {
                         keyboardType: TextInputType.emailAddress,
                         validator: (value) {
                           final email = value?.trim() ?? '';
-                          if (email.isEmpty ||
-                              !RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
-                                  .hasMatch(email)) {
+                          if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+                              .hasMatch(email)) {
                             return 'Masukkan alamat email yang valid.';
                           }
                           return null;
@@ -337,8 +404,7 @@ class _AuthPageState extends State<AuthPage> {
                             ),
                           ],
                           validator: (value) {
-                            final phone = value?.trim() ?? '';
-                            if (phone.length < 9) {
+                            if ((value?.trim().length ?? 0) < 9) {
                               return 'Masukkan nomor telepon yang valid.';
                             }
                             return null;
@@ -377,9 +443,11 @@ class _AuthPageState extends State<AuthPage> {
                         icon: Icons.lock_outline,
                         obscure: _obscurePassword,
                         suffix: IconButton(
-                          onPressed: () => setState(
-                            () => _obscurePassword = !_obscurePassword,
-                          ),
+                          onPressed: () {
+                            setState(() {
+                              _obscurePassword = !_obscurePassword;
+                            });
+                          },
                           icon: Icon(
                             _obscurePassword
                                 ? Icons.visibility_outlined
@@ -390,12 +458,15 @@ class _AuthPageState extends State<AuthPage> {
                         ),
                         validator: (value) {
                           final password = value ?? '';
+
                           if (password.isEmpty) {
                             return 'Password wajib diisi.';
                           }
+
                           if (isRegister && password.length < 8) {
                             return 'Password minimal 8 karakter.';
                           }
+
                           return null;
                         },
                       ),
@@ -475,7 +546,9 @@ class _AuthPageState extends State<AuthPage> {
                           child: OutlinedButton(
                             onPressed: _loading
                                 ? null
-                                : () => setState(() => _mitraLogin = true),
+                                : () {
+                                    setState(() => _mitraLogin = true);
+                                  },
                             style: OutlinedButton.styleFrom(
                               backgroundColor: Colors.white.withAlpha(35),
                               foregroundColor: Colors.white,
@@ -495,8 +568,9 @@ class _AuthPageState extends State<AuthPage> {
                           Padding(
                             padding: const EdgeInsets.only(top: 8),
                             child: TextButton(
-                              onPressed: () =>
-                                  setState(() => _mitraLogin = false),
+                              onPressed: () {
+                                setState(() => _mitraLogin = false);
+                              },
                               child: const Text(
                                 'Kembali ke login Customer',
                                 style: TextStyle(color: Colors.white),
@@ -522,7 +596,9 @@ class _AuthPageState extends State<AuthPage> {
                             ),
                             GestureDetector(
                               onTap: () => _switchMode(
-                                isRegister ? AuthMode.login : AuthMode.register,
+                                isRegister
+                                    ? AuthMode.login
+                                    : AuthMode.register,
                               ),
                               child: Text(
                                 isRegister ? 'Masuk' : 'Daftar',
@@ -670,11 +746,18 @@ class _AuthPageState extends State<AuthPage> {
 class WelcomePage extends StatelessWidget {
   final String role;
 
-  const WelcomePage({super.key, this.role = 'customer'});
+  const WelcomePage({
+    super.key,
+    this.role = 'customer',
+  });
 
   @override
   Widget build(BuildContext context) {
-    final isMitra = role == 'mitra';
+    final roleLabel = switch (role) {
+      'admin' => 'Admin',
+      'mitra' => 'Mitra',
+      _ => 'Customer',
+    };
 
     return Scaffold(
       appBar: AppBar(
@@ -684,12 +767,15 @@ class WelcomePage extends StatelessWidget {
             tooltip: 'Keluar',
             onPressed: () async {
               await supabase.auth.signOut();
-              if (context.mounted) {
-                Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => const AuthPage()),
-                  (_) => false,
-                );
-              }
+
+              if (!context.mounted) return;
+
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(
+                  builder: (_) => const AuthPage(),
+                ),
+                (_) => false,
+              );
             },
             icon: const Icon(Icons.logout),
           ),
@@ -714,13 +800,13 @@ class WelcomePage extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                'Login berhasil sebagai ${isMitra ? 'Mitra' : 'Customer'}.',
+                'Login berhasil sebagai $roleLabel.',
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 12),
               const Text(
                 'Halaman ini merupakan placeholder. Dashboard '
-                'Customer dan Mitra akan dibuat sesuai SRS pada tahap berikutnya.',
+                'Customer, Mitra, dan Admin akan dibuat pada tahap berikutnya.',
                 textAlign: TextAlign.center,
               ),
             ],
